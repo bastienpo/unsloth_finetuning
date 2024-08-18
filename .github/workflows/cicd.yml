@@ -1,0 +1,94 @@
+name: CI/CD 
+run-name: ${{ github.actor }} is triggering CI/CD Action
+on:
+  push:
+    branches:
+      - main
+      - 'releases/**'
+  pull_request:
+
+env:
+  UV_SYSTEM_PYTHON: 1
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  UV_CACHE_DIR: /tmp/.uv-cache
+
+jobs:
+  code_quality:
+    name: Check code quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: uv tool install ruff==0.6.1
+
+      - name: Check ruff formatting
+        run: uv run ruff format --config pyproject.toml --line-length 88 --exclude src/notebook .
+
+      - name: Check ruff linting
+        run: uv run ruff check --fix --respect-gitignore --config pyproject.toml --exclude src/notebook .
+
+  api_test:
+    name: Test API
+    runs-on: ubuntu-latest
+    needs: [ code_quality ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: uv sync --extra test
+
+      - name: Run API tests
+        run: uv run pytest .
+
+  build-and-push-image:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: [ api_test, code_quality ]
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+    
+      - name: Log in to the Container registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+    
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+  
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1.4.1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
